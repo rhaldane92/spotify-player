@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Spotify Mini Player (PKCE)</title>
+  <script src="https://sdk.scdn.co/spotify-player.js"></script>
+  <style>
+    body { background:#121212; color:white; font-family:Arial; display:flex; flex-direction:column; align-items:center; justify-content:center; height:100vh; margin:0; }
+    .player, .login { background:#181818; border-radius:12px; padding:20px; width:320px; text-align:center; box-shadow:0 4px 20px rgba(0,0,0,0.5); margin-bottom:15px; }
+    img { border-radius:8px; width:100%; margin-bottom:15px; }
+    h2,h3 { margin:5px 0; font-weight:normal; }
+    h2{font-size:18px;} h3{font-size:14px;color:#b3b3b3;}
+    .controls { display:flex; justify-content:center; gap:15px; margin:15px 0; }
+    button { background:none; border:none; color:white; font-size:20px; cursor:pointer; padding:5px 10px; border-radius:6px; }
+    .progress { width:100%; height:6px; background:#404040; border-radius:3px; overflow:hidden; }
+    .progress-bar { height:100%; background:#1db954; width:0%; }
+    input[type=range] { width:100%; margin-top:5px; }
+    label { font-size:14px;color:#b3b3b3; display:block; margin-top:10px; }
+  </style>
+</head>
+<body>
+
+  <div class="login" id="login-box">
+    <h2>Login with Spotify</h2>
+    <button id="login-btn">Login</button>
+  </div>
+
+  <div class="player" id="player-box" style="display:none;">
+    <img id="album-art" src="" alt="Album Art">
+    <h2 id="track-name">Not Playing</h2>
+    <h3 id="artist-name"></h3>
+
+    <div class="controls">
+      <button id="prev">⏮️</button>
+      <button id="play">▶️</button>
+      <button id="pause">⏸️</button>
+      <button id="next">⏭️</button>
+    </div>
+
+    <div class="progress">
+      <div class="progress-bar" id="progress-bar"></div>
+    </div>
+
+    <label for="volume">Volume</label>
+    <input type="range" id="volume" min="0" max="100" value="50">
+  </div>
+
+  <script>
+    const clientId = "5233757b34c645d3adf4e0e30a0bd1cf"; // Spotify Client ID
+    const redirectUri = "https://1f229bf928e7.ngrok-free.app/"; // ngrok HTTPS URL
+    const scopes = "streaming user-read-email user-read-private user-modify-playback-state user-read-playback-state";
+
+    // PKCE helpers
+    function generateCodeVerifier(length = 128){
+      const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
+      return Array.from({length}, () => chars[Math.floor(Math.random()*chars.length)]).join('');
+    }
+
+    async function generateCodeChallenge(verifier){
+      const data = new TextEncoder().encode(verifier);
+      const digest = await crypto.subtle.digest('SHA-256', data);
+      return btoa(String.fromCharCode(...new Uint8Array(digest)))
+        .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    }
+
+    // Login button
+    document.getElementById("login-btn").onclick = async () => {
+      const verifier = generateCodeVerifier();
+      localStorage.setItem("code_verifier", verifier);
+      const challenge = await generateCodeChallenge(verifier);
+      const authUrl = `https://accounts.spotify.com/authorize?response_type=code&client_id=${clientId}&scope=${encodeURIComponent(scopes)}&redirect_uri=${encodeURIComponent(redirectUri)}&code_challenge_method=S256&code_challenge=${challenge}`;
+      window.location.href = authUrl;
+    };
+
+    async function handleRedirect(){
+      const code = new URLSearchParams(window.location.search).get("code");
+      if(!code) return;
+
+      const verifier = localStorage.getItem("code_verifier");
+      const body = new URLSearchParams({
+        client_id: clientId,
+        grant_type: "authorization_code",
+        code: code,
+        redirect_uri: redirectUri,
+        code_verifier: verifier
+      });
+
+      const res = await fetch("https://accounts.spotify.com/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body: body
+      });
+
+      const data = await res.json();
+      localStorage.setItem("access_token", data.access_token);
+      window.history.replaceState({}, document.title, window.location.pathname);
+      initPlayer(data.access_token);
+    }
+
+    async function initPlayer(token){
+      document.getElementById("login-box").style.display = "none";
+      document.getElementById("player-box").style.display = "block";
+
+      window.onSpotifyWebPlaybackSDKReady = () => {
+        const player = new Spotify.Player({
+          name: "Mini Player",
+          getOAuthToken: cb => cb(token),
+          volume: 0.5
+        });
+
+        player.addListener("player_state_changed", state=>{
+          if(!state) return;
+          const track = state.track_window.current_track;
+          document.getElementById("track-name").innerText = track.name;
+          document.getElementById("artist-name").innerText = track.artists.map(a=>a.name).join(", ");
+          document.getElementById("album-art").src = track.album.images[0].url;
+
+          const progressBar = document.getElementById("progress-bar");
+          const updateProgress = ()=>{ progressBar.style.width = (state.position/state.duration*100)+"%"; };
+          updateProgress();
+          clearInterval(window.progressInterval);
+          window.progressInterval = setInterval(()=>{ state.position+=1000; updateProgress(); },1000);
+        });
+
+        player.addListener("ready", ({device_id})=>{
+          console.log("Ready with Device ID", device_id);
+
+          document.getElementById("play").onclick = ()=> fetch(`https://api.spotify.com/v1/me/player/play?device_id=${device_id}`, { method:"PUT", headers:{Authorization:`Bearer ${token}`} });
+          document.getElementById("pause").onclick = ()=> fetch(`https://api.spotify.com/v1/me/player/pause?device_id=${device_id}`, { method:"PUT", headers:{Authorization:`Bearer ${token}`} });
+          document.getElementById("next").onclick = ()=> fetch(`https://api.spotify.com/v1/me/player/next?device_id=${device_id}`, { method:"POST", headers:{Authorization:`Bearer ${token}`} });
+          document.getElementById("prev").onclick = ()=> fetch(`https://api.spotify.com/v1/me/player/previous?device_id=${device_id}`, { method:"POST", headers:{Authorization:`Bearer ${token}`} });
+
+          const volumeSlider = document.getElementById("volume");
+          volumeSlider.addEventListener("input", () => player.setVolume(volumeSlider.value/100));
+        });
+
+        player.connect();
+      };
+    }
+
+    const storedToken = localStorage.getItem("access_token");
+    if(storedToken) initPlayer(storedToken);
+    else handleRedirect();
+  </script>
+</body>
+</html>
